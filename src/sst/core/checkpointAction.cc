@@ -195,7 +195,7 @@ CheckpointAction::createCheckpoint(Simulation_impl* sim)
 
     // Determine the actual filename to record in registry (add .gz if compression is enabled)
     std::string registry_filename = filename;
-    if (sim->isCheckpointCompressionEnabled()) {
+    if ( sim->isCheckpointCompressionEnabled() ) {
         registry_filename += ".gz";
     }
 

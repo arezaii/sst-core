@@ -850,23 +850,23 @@ restart_graph_gen(SimTime_t& cpt_currentSimCycle, int& cpt_currentPriority)
     }
 
     size_t size;
-    
+
     // Check if the globals file is compressed by looking for .gz extension
-    bool is_compressed = (globals_filename.length() > 3 && 
-                         globals_filename.substr(globals_filename.length() - 3) == ".gz");
-    
-    if (is_compressed) {
+    bool is_compressed =
+        (globals_filename.length() > 3 && globals_filename.substr(globals_filename.length() - 3) == ".gz");
+
+    if ( is_compressed ) {
 #ifdef HAVE_LIBZ
         // Handle compressed globals file
         gzFile gz_file = gzopen(globals_filename.c_str(), "rb");
-        if (!gz_file) {
+        if ( !gz_file ) {
             fprintf(stderr, "Unable to open compressed checkpoint globals file [%s]\n", globals_filename.c_str());
             SST_Exit(-1);
         }
         
         // Read Section 1 size (this contains the Config object)
         int bytes_read = gzread(gz_file, &size, sizeof(size));
-        if (bytes_read != sizeof(size)) {
+        if ( bytes_read != sizeof(size) ) {
             fprintf(stderr, "Failed to read section 1 size from compressed globals file\n");
             gzclose(gz_file);
             SST_Exit(-1);
@@ -875,9 +875,9 @@ restart_graph_gen(SimTime_t& cpt_currentSimCycle, int& cpt_currentPriority)
         // Read Section 1 data (contains Config object)
         restart_data_buffer.resize(size);
         size_t total_read = 0;
-        while (total_read < size) {
+        while ( total_read < size ) {
             bytes_read = gzread(gz_file, restart_data_buffer.data() + total_read, size - total_read);
-            if (bytes_read <= 0) {
+            if ( bytes_read <= 0 ) {
                 fprintf(stderr, "Failed to read section 1 data from compressed globals file\n");
                 gzclose(gz_file);
                 SST_Exit(-1);
@@ -890,7 +890,8 @@ restart_graph_gen(SimTime_t& cpt_currentSimCycle, int& cpt_currentPriority)
         fprintf(stderr, "Compressed checkpoint found but zlib not available\n");
         SST_Exit(-1);
 #endif
-    } else {
+    }
+    else {
         // Handle uncompressed globals file (original logic)
         fs_globals.read(reinterpret_cast<char*>(&size), sizeof(size));
         restart_data_buffer.resize(size);
@@ -905,7 +906,8 @@ restart_graph_gen(SimTime_t& cpt_currentSimCycle, int& cpt_currentPriority)
     // Handle backward compatibility with checkpoints created before checkpoint_compression was added
     try {
         SST_SER(cpt_config);
-    } catch (const std::exception& e) {
+    }
+    catch ( const std::exception& e ) {
         // If deserialization fails, it's likely due to checkpoint format differences
         std::cerr << "\nError: Incompatible checkpoint format detected.\n";
         std::cerr << "This checkpoint was likely created with an older version of SST-Core\n";
@@ -1656,14 +1658,14 @@ main(int argc, char* argv[])
     MPI_Finalize();
 #endif
 
-    // Force Python cleanup to prevent hanging on exit
-    // This is necessary because SST embeds Python but doesn't always
-    // properly finalize the interpreter, which can leave threads running
-    #ifdef HAVE_PYTHON
-    if (Py_IsInitialized()) {
+// Force Python cleanup to prevent hanging on exit
+// This is necessary because SST embeds Python but doesn't always
+// properly finalize the interpreter, which can leave threads running
+#ifdef HAVE_PYTHON
+    if ( Py_IsInitialized() ) {
         Py_Finalize();
     }
-    #endif
+#endif
 
     return 0;
 }

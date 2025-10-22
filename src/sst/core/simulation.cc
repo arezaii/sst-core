@@ -45,6 +45,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <exception>
 #include <fstream>
@@ -57,6 +58,11 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#ifdef HAVE_LIBZ
+#include <sys/stat.h>
+#include <zlib.h>
+#endif
 
 
 #define SST_SIMTIME_MAX 0xffffffffffffffff
@@ -174,6 +180,12 @@ UnitAlgebra
 Simulation_impl::getEndSimTime() const
 {
     return timeLord.getTimeBase() * getEndSimCycle();
+}
+
+bool
+Simulation_impl::isCheckpointCompressionEnabled()
+{
+    return config.checkpoint_compression();
 }
 
 /** Simulation_impl functions **/
@@ -1687,7 +1699,31 @@ Simulation_impl::checkpoint_write_globals(
         return;
     }
 
-    std::ofstream fs = filesystem.ofstream(globals_filename, std::ios::out | std::ios::binary);
+    // Determine if compression should be used
+    bool use_compression = config.checkpoint_compression();
+    std::string final_globals_filename = use_compression ? globals_filename + ".gz" : globals_filename;
+
+#ifdef HAVE_LIBZ
+    gzFile gz_file = nullptr;
+    if (use_compression) {
+        gz_file = gzopen(final_globals_filename.c_str(), "wb");
+        if (!gz_file) {
+            // Fall back to uncompressed if compression fails
+            use_compression = false;
+            sim_output.verbose(CALL_INFO, 1, 0, "WARNING: Failed to open compressed globals file, falling back to uncompressed\n");
+        }
+    }
+#else
+    if (use_compression) {
+        use_compression = false;
+        sim_output.verbose(CALL_INFO, 1, 0, "WARNING: Compression requested but zlib not available, using uncompressed\n");
+    }
+#endif
+
+    std::ofstream fs;
+    if (!use_compression) {
+        fs = filesystem.ofstream(globals_filename, std::ios::out | std::ios::binary);
+    }
 
     // TODO: Add error checking for file open
 
@@ -1739,8 +1775,21 @@ Simulation_impl::checkpoint_write_globals(
     // Store the stats config
     SST_SER(stats_config_);
 
-    fs.write(reinterpret_cast<const char*>(&size), sizeof(size));
-    fs.write(buffer.data(), size);
+    // Write Section 1 data (compressed or uncompressed)
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    if (use_compression) {
+#ifdef HAVE_LIBZ
+        gzwrite(gz_file, reinterpret_cast<const char*>(&size), sizeof(size));
+        gzwrite(gz_file, buffer.data(), size);
+#endif
+    } else {
+        fs.write(reinterpret_cast<const char*>(&size), sizeof(size));
+        fs.write(buffer.data(), size);
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto section1_duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
 
     /* Section 2: Common data for Simulation_impl */
     ser.start_sizing();
@@ -1759,10 +1808,36 @@ Simulation_impl::checkpoint_write_globals(
     SST_SER(max_event_id);
 
 
-    fs.write(reinterpret_cast<const char*>(&size), sizeof(size));
-    fs.write(buffer.data(), size);
+    // Write Section 2 data (compressed or uncompressed)
+    if (use_compression) {
+#ifdef HAVE_LIBZ
+        gzwrite(gz_file, reinterpret_cast<const char*>(&size), sizeof(size));
+        gzwrite(gz_file, buffer.data(), size);
+        gzclose(gz_file);
+#endif
+    } else {
+        fs.write(reinterpret_cast<const char*>(&size), sizeof(size));
+        fs.write(buffer.data(), size);
+        fs.close();
+    }
 
-    fs.close();
+    auto total_end_time = std::chrono::high_resolution_clock::now();
+    auto total_duration = std::chrono::duration_cast<std::chrono::microseconds>(total_end_time - start_time);
+
+    // Log compression metrics if enabled
+    if (use_compression) {
+        struct stat compressed_stat;
+        if (stat(final_globals_filename.c_str(), &compressed_stat) == 0) {
+            size_t total_original_size = buffer.size() + sizeof(size) * 2; // Approximate total size
+            size_t compressed_size = compressed_stat.st_size;
+            double compression_ratio = (double)total_original_size / compressed_size;
+
+            sim_output.verbose(CALL_INFO, 1, 0,
+                "Global checkpoint compression - Original: ~%zu bytes, Compressed: %zu bytes, "
+                "Ratio: %.2fx, Time: %lld μs\n",
+                total_original_size, compressed_size, compression_ratio, total_duration.count());
+        }
+    }
 
 
     std::ofstream fs_reg = filesystem.ofstream(registry_filename, std::ios::out);
@@ -1788,10 +1863,12 @@ Simulation_impl::checkpoint_write_globals(
     WR(globalOutputFileName);
     std::string checkpoint_prefix = checkpoint_prefix_;
     WR(checkpoint_prefix);
+    bool checkpoint_compression = use_compression;
+    WR(checkpoint_compression);
     fs_reg << std::endl;
 #undef WR
 
-    fs_reg << "** (globals): " << globals_filename << std::endl;
+    fs_reg << "** (globals): " << final_globals_filename << std::endl;
 
     fs_reg.close();
 }
@@ -1821,8 +1898,10 @@ Simulation_impl::checkpoint_append_registry(const std::string& registry_name, co
 void
 Simulation_impl::checkpoint(const std::string& checkpoint_filename)
 {
-    std::ofstream fs     = filesystem.ofstream(checkpoint_filename, std::ios::out | std::ios::binary);
-    // TODO: Add error checking for file open
+    // Determine if compression should be used
+    bool use_compression = config.checkpoint_compression();
+    std::string final_filename = use_compression ? checkpoint_filename + ".gz" : checkpoint_filename;
+
     uint64_t      offset = 0;
 
     SST::Core::Serialization::serializer ser;
@@ -1848,42 +1927,86 @@ Simulation_impl::checkpoint(const std::string& checkpoint_filename)
     SST_SER(interThreadMinLatency);
     SST_SER(independent);
 
-    // Write buffer to file
-    fs.write(reinterpret_cast<const char*>(&size), sizeof(size));
-    fs.write(&buffer[0], size);
-    offset += (sizeof(size) + size);
-
-    size = compInfoMap.size();
-    fs.write(reinterpret_cast<const char*>(&size), sizeof(size));
-    offset += size;
-
     // Clear the offsets vector to start this round
     component_blob_offsets_.clear();
 
     // Serialize component blobs individually
+    std::vector<std::pair<size_t, std::vector<char>>> component_buffers;
     for ( auto comp = compInfoMap.begin(); comp != compInfoMap.end(); comp++ ) {
         ser.start_sizing();
         ComponentInfo* compinfo = *comp;
         SST_SER(compinfo);
-        size = ser.size();
-        buffer.resize(size);
+        size_t comp_size = ser.size();
+        std::vector<char> comp_buffer(comp_size);
 
-        ser.start_packing(&buffer[0], size);
+        ser.start_packing(&comp_buffer[0], comp_size);
         SST_SER(compinfo);
 
         component_blob_offsets_.emplace_back(compinfo->id_, offset);
-        fs.write(reinterpret_cast<const char*>(&size), sizeof(size));
-        fs.write(&buffer[0], size);
-        offset += (sizeof(size) + size);
+        component_buffers.emplace_back(comp_size, std::move(comp_buffer));
+        offset += (sizeof(comp_size) + comp_size);
     }
 
-    fs.close();
+    // Now write everything either compressed or uncompressed
+    if (use_compression) {
+#ifdef HAVE_LIBZ
+        gzFile gz_file = gzopen(final_filename.c_str(), "wb");
+        if (gz_file) {
+            // Write Simulation_impl buffer
+            gzwrite(gz_file, reinterpret_cast<const char*>(&size), sizeof(size));
+            gzwrite(gz_file, &buffer[0], size);
+
+            // Write number of components
+            size_t num_components = compInfoMap.size();
+            gzwrite(gz_file, reinterpret_cast<const char*>(&num_components), sizeof(num_components));
+
+            // Write component buffers
+            for (const auto& comp_buf : component_buffers) {
+                size_t comp_size = comp_buf.first;
+                gzwrite(gz_file, reinterpret_cast<const char*>(&comp_size), sizeof(comp_size));
+                gzwrite(gz_file, &comp_buf.second[0], comp_size);
+            }
+
+            gzclose(gz_file);
+        } else {
+            use_compression = false;
+        }
+#else
+        use_compression = false;
+#endif
+    }
+
+    if (!use_compression) {
+        // Fallback to uncompressed
+        std::ofstream fs = filesystem.ofstream(checkpoint_filename, std::ios::out | std::ios::binary);
+        // TODO: Add error checking for file open
+
+        // Write Simulation_impl buffer
+        fs.write(reinterpret_cast<const char*>(&size), sizeof(size));
+        fs.write(&buffer[0], size);
+
+        // Write number of components
+        size_t num_components = compInfoMap.size();
+        fs.write(reinterpret_cast<const char*>(&num_components), sizeof(num_components));
+
+        // Write component buffers
+        for (const auto& comp_buf : component_buffers) {
+            size_t comp_size = comp_buf.first;
+            fs.write(reinterpret_cast<const char*>(&comp_size), sizeof(comp_size));
+            fs.write(&comp_buf.second[0], comp_size);
+        }
+
+        fs.close();
+    }
+
     tv_sort_.data.clear();
 }
 
 void
 Simulation_impl::restart()
 {
+    sim_output.verbose(CALL_INFO, 1, 0, "Starting restart process from config file: %s\n", config.configFile().c_str());
+
     std::ifstream fs(config.configFile());
 
     std::string line;
@@ -1895,25 +2018,109 @@ Simulation_impl::restart()
         if ( pos == 0 ) {
             // Get the file name
             globals_filename = line.substr(search_str.length());
+            sim_output.verbose(CALL_INFO, 1, 0, "Found globals file: %s\n", globals_filename.c_str());
             break;
         }
     }
 
-    // Open the globals file
-    std::ifstream     fs_globals(globals_filename, std::ios::binary);
+    // Detect if globals file is compressed
+    bool is_compressed = (globals_filename.length() > 3 &&
+                         globals_filename.substr(globals_filename.length()-3) == ".gz");
+
     size_t            size;
     std::vector<char> buffer;
     uint64_t          max_event_id;
 
-    // Read how much data in Section 1, which we will skip over
-    fs_globals.read(reinterpret_cast<char*>(&size), sizeof(size));
-    fs_globals.seekg(size, std::ios_base::cur);
+    if (is_compressed) {
+#ifdef HAVE_LIBZ
+        gzFile gz_file = gzopen(globals_filename.c_str(), "rb");
+        if (!gz_file) {
+            sim_output.fatal(CALL_INFO, 1, "Failed to open compressed globals file: %s\n",
+                           globals_filename.c_str());
+            return;
+        }
 
-    // Now read the size of the common data blob
-    fs_globals.read(reinterpret_cast<char*>(&size), sizeof(size));
+        // Read how much data in Section 1, which we will skip over
+        int bytes_read = gzread(gz_file, &size, sizeof(size));
+        if (bytes_read != sizeof(size)) {
+            sim_output.fatal(CALL_INFO, 1, "Failed to read section 1 size from compressed file, got %d bytes, errno: %s\n", bytes_read, gzerror(gz_file, NULL));
+            gzclose(gz_file);
+            return;
+        }
 
-    buffer.resize(size);
-    fs_globals.read(buffer.data(), size);
+        // Sanity check the size to prevent bad_alloc
+        if (size > 10000000) { // 10MB seems reasonable for section 1
+            sim_output.fatal(CALL_INFO, 1, "Section 1 size %zu seems too large, aborting\n", size);
+            gzclose(gz_file);
+            return;
+        }
+        sim_output.verbose(CALL_INFO, 1, 0, "Section 1 size: %zu bytes\n", size);
+
+        // Skip Section 1 data by reading it in chunks
+        std::vector<char> temp_buffer(size);
+        size_t total_read = 0;
+        while (total_read < size) {
+            bytes_read = gzread(gz_file, temp_buffer.data() + total_read, size - total_read);
+            if (bytes_read <= 0) {
+                sim_output.fatal(CALL_INFO, 1, "Failed to read section 1 data, read %zu/%zu bytes, error: %s\n",
+                               total_read, size, gzerror(gz_file, NULL));
+                gzclose(gz_file);
+                return;
+            }
+            total_read += bytes_read;
+        }
+
+        // Now read the size of the common data blob (Section 2)
+        bytes_read = gzread(gz_file, &size, sizeof(size));
+        if (bytes_read != sizeof(size)) {
+            sim_output.fatal(CALL_INFO, 1, "Failed to read section 2 size from compressed file, got %d bytes, error: %s\n",
+                           bytes_read, gzerror(gz_file, NULL));
+            gzclose(gz_file);
+            return;
+        }
+
+        // Sanity check section 2 size
+        if (size > 1000000) { // 1MB seems reasonable for section 2
+            sim_output.fatal(CALL_INFO, 1, "Section 2 size %zu seems too large, aborting\n", size);
+            gzclose(gz_file);
+            return;
+        }
+        sim_output.verbose(CALL_INFO, 1, 0, "Section 2 size: %zu bytes\n", size);
+
+        buffer.resize(size);
+        total_read = 0;
+        while (total_read < size) {
+            bytes_read = gzread(gz_file, buffer.data() + total_read, size - total_read);
+            if (bytes_read <= 0) {
+                sim_output.fatal(CALL_INFO, 1, "Failed to read section 2 data, read %zu/%zu bytes, error: %s\n",
+                               total_read, size, gzerror(gz_file, NULL));
+                gzclose(gz_file);
+                return;
+            }
+            total_read += bytes_read;
+        }
+
+        gzclose(gz_file);
+#else
+        sim_output.fatal(CALL_INFO, 1, "Compressed checkpoint found but zlib not available\n");
+        return;
+#endif
+    } else {
+        // Open the globals file
+        std::ifstream fs_globals(globals_filename, std::ios::binary);
+
+        // Read how much data in Section 1, which we will skip over
+        fs_globals.read(reinterpret_cast<char*>(&size), sizeof(size));
+        fs_globals.seekg(size, std::ios_base::cur);
+
+        // Now read the size of the common data blob
+        fs_globals.read(reinterpret_cast<char*>(&size), sizeof(size));
+
+        buffer.resize(size);
+        fs_globals.read(buffer.data(), size);
+
+        fs_globals.close();
+    }
 
     SST::Core::Serialization::serializer ser;
     ser.enable_pointer_tracking();
@@ -1925,8 +2132,6 @@ Simulation_impl::restart()
     SST_SER(minPart);
     SST_SER(minPartTC);
     SST_SER(max_event_id);
-
-    fs_globals.close();
 
     // Set the runmode and output directory
     runMode          = config.runMode();
@@ -1969,58 +2174,97 @@ Simulation_impl::restart()
 
     if ( blob_filenames.size() == 1 ) {
         // This is a regular restart (same parallelism as checkpoint)
-        std::ifstream fs_blob(blob_filenames[0], std::ios::binary);
 
-        /* Now get the global blob */
-        fs_blob.read(reinterpret_cast<char*>(&size), sizeof(size));
-        buffer.resize(size);
-        fs_blob.read(buffer.data(), size);
+        // Detect if per-thread file is compressed
+        std::string filename = blob_filenames[0];
+        bool is_per_thread_compressed = (filename.length() > 3 &&
+                                        filename.substr(filename.length()-3) == ".gz");
 
-        ser.start_unpacking(buffer.data(), size);
+        if (is_per_thread_compressed) {
+#ifdef HAVE_LIBZ
+            gzFile gz_file = gzopen(filename.c_str(), "rb");
+            if (!gz_file) {
+                sim_output.fatal(CALL_INFO, 1, "Failed to open compressed per-thread file: %s\n", filename.c_str());
+                return;
+            }
 
-        SST_SER(interThreadMinLatency);
-        SST_SER(independent);
+            // Read simulation data size and data
+            int bytes_read = gzread(gz_file, &size, sizeof(size));
+            if (bytes_read != sizeof(size)) {
+                sim_output.fatal(CALL_INFO, 1, "Failed to read simulation data size from compressed file\n");
+                gzclose(gz_file);
+                return;
+            }
 
-        // Set up the syncManager
-        syncManager = new SyncManager(my_rank, num_ranks, minPart, interThreadLatencies, real_time_);
-        // Look at simulation.cc line 365 on setting up profile tools
-
-        completeBarrier.wait();
-
-        /* Initial fix up of stat engine, the rest is after components re-register statistics */
-        stat_engine.restart();
-
-
-        /* Extract components */
-        size_t compCount;
-        fs_blob.read(reinterpret_cast<char*>(&compCount), sizeof(compCount));
-
-        // Deserialize component blobs individually
-        for ( size_t comp = 0; comp < compCount; comp++ ) {
-            fs_blob.read(reinterpret_cast<char*>(&size), sizeof(size));
             buffer.resize(size);
-            fs_blob.read(&buffer[0], size);
-            ser.start_unpacking(&buffer[0], size);
-            ComponentInfo* compInfo = new ComponentInfo();
-            SST_SER(compInfo);
-            compInfoMap.insert(compInfo);
-        }
-        fs_blob.close();
-    }
-    else {
-        // This is a parallel checkpoint restarted as a serial job
-        interThreadMinLatency = MAX_SIMTIME_T;
-        independent           = false;
-        minPart               = MAX_SIMTIME_T;
+            size_t total_read = 0;
+            while (total_read < size) {
+                bytes_read = gzread(gz_file, buffer.data() + total_read, size - total_read);
+                if (bytes_read <= 0) {
+                    sim_output.fatal(CALL_INFO, 1, "Failed to read simulation data from compressed file\n");
+                    gzclose(gz_file);
+                    return;
+                }
+                total_read += bytes_read;
+            }
 
-        syncManager = new SyncManager(my_rank, num_ranks, minPart, interThreadLatencies, real_time_);
+            ser.start_unpacking(buffer.data(), size);
 
-        stat_engine.restart();
+            SST_SER(interThreadMinLatency);
+            SST_SER(independent);
 
-        // Now we need to extract the components from all of the files
-        std::ifstream fs_blob;
-        for ( std::string filename : blob_filenames ) {
-            fs_blob.open(filename, std::ios::binary);
+            // Set up the syncManager
+            syncManager = new SyncManager(my_rank, num_ranks, minPart, interThreadLatencies, real_time_);
+            // Look at simulation.cc line 365 on setting up profile tools
+
+            completeBarrier.wait();
+
+            /* Initial fix up of stat engine, the rest is after components re-register statistics */
+            stat_engine.restart();
+
+            /* Extract components */
+            size_t compCount;
+            bytes_read = gzread(gz_file, &compCount, sizeof(compCount));
+            if (bytes_read != sizeof(compCount)) {
+                sim_output.fatal(CALL_INFO, 1, "Failed to read component count from compressed file\n");
+                gzclose(gz_file);
+                return;
+            }
+
+            // Deserialize component blobs individually
+            for ( size_t comp = 0; comp < compCount; comp++ ) {
+                bytes_read = gzread(gz_file, &size, sizeof(size));
+                if (bytes_read != sizeof(size)) {
+                    sim_output.fatal(CALL_INFO, 1, "Failed to read component size from compressed file\n");
+                    gzclose(gz_file);
+                    return;
+                }
+
+                buffer.resize(size);
+                total_read = 0;
+                while (total_read < size) {
+                    bytes_read = gzread(gz_file, buffer.data() + total_read, size - total_read);
+                    if (bytes_read <= 0) {
+                        sim_output.fatal(CALL_INFO, 1, "Failed to read component data from compressed file\n");
+                        gzclose(gz_file);
+                        return;
+                    }
+                    total_read += bytes_read;
+                }
+
+                ser.start_unpacking(&buffer[0], size);
+                ComponentInfo* compInfo = new ComponentInfo();
+                SST_SER(compInfo);
+                compInfoMap.insert(compInfo);
+            }
+            gzclose(gz_file);
+#else
+            sim_output.fatal(CALL_INFO, 1, "Compressed per-thread checkpoint found but zlib not available\n");
+            return;
+#endif
+        } else {
+            // Uncompressed per-thread file
+            std::ifstream fs_blob(filename, std::ios::binary);
 
             /* Now get the global blob */
             fs_blob.read(reinterpret_cast<char*>(&size), sizeof(size));
@@ -2029,14 +2273,19 @@ Simulation_impl::restart()
 
             ser.start_unpacking(buffer.data(), size);
 
-            // These are the variables interThreadLatencies and
-            // independent. They aren't used in this path, but need to
-            // be read from the serialization stream
-            uint64_t dummy_int;
-            SST_SER(dummy_int); // interThreadLatencies
-            bool dummy_bool;
-            SST_SER(dummy_bool); // independent
+            SST_SER(interThreadMinLatency);
+            SST_SER(independent);
 
+            // Set up the syncManager
+            syncManager = new SyncManager(my_rank, num_ranks, minPart, interThreadLatencies, real_time_);
+            // Look at simulation.cc line 365 on setting up profile tools
+
+            completeBarrier.wait();
+
+            /* Initial fix up of stat engine, the rest is after components re-register statistics */
+            stat_engine.restart();
+
+            /* Extract components */
             size_t compCount;
             fs_blob.read(reinterpret_cast<char*>(&compCount), sizeof(compCount));
 
@@ -2051,6 +2300,136 @@ Simulation_impl::restart()
                 compInfoMap.insert(compInfo);
             }
             fs_blob.close();
+        };
+    }
+    else {
+        // This is a parallel checkpoint restarted as a serial job
+        interThreadMinLatency = MAX_SIMTIME_T;
+        independent           = false;
+        minPart               = MAX_SIMTIME_T;
+
+        syncManager = new SyncManager(my_rank, num_ranks, minPart, interThreadLatencies, real_time_);
+
+        stat_engine.restart();
+
+        // Now we need to extract the components from all of the files
+        for ( std::string filename : blob_filenames ) {
+
+            // Detect if per-thread file is compressed
+            bool is_per_thread_compressed = (filename.length() > 3 &&
+                                            filename.substr(filename.length()-3) == ".gz");
+
+            if (is_per_thread_compressed) {
+#ifdef HAVE_LIBZ
+                gzFile gz_file = gzopen(filename.c_str(), "rb");
+                if (!gz_file) {
+                    sim_output.fatal(CALL_INFO, 1, "Failed to open compressed per-thread file: %s\n", filename.c_str());
+                    return;
+                }
+
+                // Read simulation data size and data
+                int bytes_read = gzread(gz_file, &size, sizeof(size));
+                if (bytes_read != sizeof(size)) {
+                    sim_output.fatal(CALL_INFO, 1, "Failed to read simulation data size from compressed file\n");
+                    gzclose(gz_file);
+                    return;
+                }
+
+                buffer.resize(size);
+                size_t total_read = 0;
+                while (total_read < size) {
+                    bytes_read = gzread(gz_file, buffer.data() + total_read, size - total_read);
+                    if (bytes_read <= 0) {
+                        sim_output.fatal(CALL_INFO, 1, "Failed to read simulation data from compressed file\n");
+                        gzclose(gz_file);
+                        return;
+                    }
+                    total_read += bytes_read;
+                }
+
+                ser.start_unpacking(buffer.data(), size);
+
+                // These are the variables interThreadLatencies and
+                // independent. They aren't used in this path, but need to
+                // be read from the serialization stream
+                uint64_t dummy_int;
+                SST_SER(dummy_int); // interThreadLatencies
+                bool dummy_bool;
+                SST_SER(dummy_bool); // independent
+
+                size_t compCount;
+                bytes_read = gzread(gz_file, &compCount, sizeof(compCount));
+                if (bytes_read != sizeof(compCount)) {
+                    sim_output.fatal(CALL_INFO, 1, "Failed to read component count from compressed file\n");
+                    gzclose(gz_file);
+                    return;
+                }
+
+                // Deserialize component blobs individually
+                for ( size_t comp = 0; comp < compCount; comp++ ) {
+                    bytes_read = gzread(gz_file, &size, sizeof(size));
+                    if (bytes_read != sizeof(size)) {
+                        sim_output.fatal(CALL_INFO, 1, "Failed to read component size from compressed file\n");
+                        gzclose(gz_file);
+                        return;
+                    }
+
+                    buffer.resize(size);
+                    total_read = 0;
+                    while (total_read < size) {
+                        bytes_read = gzread(gz_file, buffer.data() + total_read, size - total_read);
+                        if (bytes_read <= 0) {
+                            sim_output.fatal(CALL_INFO, 1, "Failed to read component data from compressed file\n");
+                            gzclose(gz_file);
+                            return;
+                        }
+                        total_read += bytes_read;
+                    }
+
+                    ser.start_unpacking(&buffer[0], size);
+                    ComponentInfo* compInfo = new ComponentInfo();
+                    SST_SER(compInfo);
+                    compInfoMap.insert(compInfo);
+                }
+                gzclose(gz_file);
+#else
+                sim_output.fatal(CALL_INFO, 1, "Compressed per-thread checkpoint found but zlib not available\n");
+                return;
+#endif
+            } else {
+                // Uncompressed per-thread file
+                std::ifstream fs_blob(filename, std::ios::binary);
+
+                /* Now get the global blob */
+                fs_blob.read(reinterpret_cast<char*>(&size), sizeof(size));
+                buffer.resize(size);
+                fs_blob.read(buffer.data(), size);
+
+                ser.start_unpacking(buffer.data(), size);
+
+                // These are the variables interThreadLatencies and
+                // independent. They aren't used in this path, but need to
+                // be read from the serialization stream
+                uint64_t dummy_int;
+                SST_SER(dummy_int); // interThreadLatencies
+                bool dummy_bool;
+                SST_SER(dummy_bool); // independent
+
+                size_t compCount;
+                fs_blob.read(reinterpret_cast<char*>(&compCount), sizeof(compCount));
+
+                // Deserialize component blobs individually
+                for ( size_t comp = 0; comp < compCount; comp++ ) {
+                    fs_blob.read(reinterpret_cast<char*>(&size), sizeof(size));
+                    buffer.resize(size);
+                    fs_blob.read(&buffer[0], size);
+                    ser.start_unpacking(&buffer[0], size);
+                    ComponentInfo* compInfo = new ComponentInfo();
+                    SST_SER(compInfo);
+                    compInfoMap.insert(compInfo);
+                }
+                fs_blob.close();
+            }
         }
     }
 

@@ -583,6 +583,10 @@ Config::insertOptions()
         "Set the format for checkpoint filenames. See extended help for format options.  Default is "
         "\"%p_%n_%t/%p_%n_%t\"",
         checkpoint_name_format_, true, false, false);
+    DEF_FLAG("checkpoint-compression", 0,
+        "Enable compression for checkpoint files using zlib. Compressed checkpoint files "
+        "will have .gz extension and require the same SST version with zlib support for restart.",
+        checkpoint_compression_, false, true, false);
 
     enableDashDashSupport(std::bind(&OptionDefinition::parse, &model_options_, _1));
     addPositionalCallback(std::bind(&Config::positionalCallback, this, _1, _2));

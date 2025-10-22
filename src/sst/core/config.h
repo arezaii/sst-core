@@ -611,6 +611,11 @@ private:
         std::bind(&Config::parse_checkpoint_name_format, std::placeholders::_1, std::placeholders::_2),
         &Config::ext_help_checkpoint_format);
 
+    /**
+     * Enable compression for checkpoint files using zlib
+     */
+    SST_CONFIG_DECLARE_OPTION(bool, checkpoint_compression, false, &StandardConfigParsers::flag_set_true);
+
 public:
 
     /** Get whether or not any of the checkpoint options were turned on */
@@ -623,7 +628,6 @@ public:
 
     void serialize_order(SST::Core::Serialization::serializer& ser) override;
     ImplementSerializable(SST::Config);
-
 
 protected:
     std::string getUsagePrelude() override;

@@ -327,6 +327,11 @@ public:
      */
     bool isWireUpFinished() { return wireUpFinished_; }
 
+    /**
+     * Returns true if checkpoint compression is enabled.
+     */
+    bool isCheckpointCompressionEnabled();
+
     uint64_t getTimeVortexMaxDepth() const;
 
     uint64_t getTimeVortexCurrentDepth() const;

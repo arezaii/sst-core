@@ -193,6 +193,12 @@ CheckpointAction::createCheckpoint(Simulation_impl* sim)
     // Write out the checkpoints for the partitions
     sim->checkpoint(filename);
 
+    // Determine the actual filename to record in registry (add .gz if compression is enabled)
+    std::string registry_filename = filename;
+    if (sim->isCheckpointCompressionEnabled()) {
+        registry_filename += ".gz";
+    }
+
     // Write out the registry.  Rank 0 thread 0 will write the global
     // state and its registry, then each thread will take a turn
     // writing its part of the registry
@@ -213,7 +219,7 @@ CheckpointAction::createCheckpoint(Simulation_impl* sim)
             for ( uint32_t t = 0; t < num_ranks.thread; ++t ) {
                 // If this is my thread go ahead
                 if ( t == rank_.thread ) {
-                    sim->checkpoint_append_registry(registry_name, filename);
+                    sim->checkpoint_append_registry(registry_name, registry_filename);
                     barrier.wait();
                 }
                 else {

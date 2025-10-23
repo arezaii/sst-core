@@ -863,7 +863,7 @@ restart_graph_gen(SimTime_t& cpt_currentSimCycle, int& cpt_currentPriority)
             fprintf(stderr, "Unable to open compressed checkpoint globals file [%s]\n", globals_filename.c_str());
             SST_Exit(-1);
         }
-        
+
         // Read Section 1 size (this contains the Config object)
         int bytes_read = gzread(gz_file, &size, sizeof(size));
         if ( bytes_read != sizeof(size) ) {
@@ -871,7 +871,7 @@ restart_graph_gen(SimTime_t& cpt_currentSimCycle, int& cpt_currentPriority)
             gzclose(gz_file);
             SST_Exit(-1);
         }
-        
+
         // Read Section 1 data (contains Config object)
         restart_data_buffer.resize(size);
         size_t total_read = 0;
@@ -884,7 +884,7 @@ restart_graph_gen(SimTime_t& cpt_currentSimCycle, int& cpt_currentPriority)
             }
             total_read += bytes_read;
         }
-        
+
         gzclose(gz_file);
 #else
         fprintf(stderr, "Compressed checkpoint found but zlib not available\n");
@@ -916,10 +916,10 @@ restart_graph_gen(SimTime_t& cpt_currentSimCycle, int& cpt_currentPriority)
         std::cerr << "1. Use the same SST-Core version that created the checkpoint, OR\n";
         std::cerr << "2. Create a new checkpoint with the current SST-Core version\n\n";
         std::cerr << "Technical details: " << e.what() << std::endl;
-        
+
         throw std::runtime_error("Checkpoint format version mismatch - checkpoint compression feature added");
     }
-    
+
     cfg.merge_checkpoint_options(cpt_config);
 
     SST_SER(cpt_ranks.rank);
@@ -1656,15 +1656,6 @@ main(int argc, char* argv[])
 
 #ifdef SST_CONFIG_HAVE_MPI
     MPI_Finalize();
-#endif
-
-// Force Python cleanup to prevent hanging on exit
-// This is necessary because SST embeds Python but doesn't always
-// properly finalize the interpreter, which can leave threads running
-#ifdef HAVE_PYTHON
-    if ( Py_IsInitialized() ) {
-        Py_Finalize();
-    }
 #endif
 
     return 0;

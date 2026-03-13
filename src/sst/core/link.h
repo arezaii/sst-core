@@ -341,7 +341,10 @@ protected:
     */
     void setTag(uint32_t new_tag)
     {
-        if ( tag != type_max<uint32_t> ) pair_link->tag = new_tag;
+        tag = new_tag;
+        if ( pair_link ) {
+            pair_link->tag = new_tag;
+        }
 
         // Interleaved links
         // pair_link->tag = new_tag;

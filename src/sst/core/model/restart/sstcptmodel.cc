@@ -92,7 +92,7 @@ SSTCPTModelDefinition::createConfigGraph()
     }
 
     // Need to open the globals file
-    std::ifstream fs_globals(globals_filename);
+    std::ifstream fs_globals(globals_filename, std::ios::binary);
     if ( !fs_globals.is_open() ) {
         if ( fs_globals.bad() ) {
             fprintf(stderr, "Unable to open checkpoint globals file [%s]: badbit set\n", globals_filename.c_str());
@@ -273,6 +273,7 @@ SSTCPTModelDefinition::createConfigGraph()
 
     fs_globals.read(reinterpret_cast<char*>(&size), sizeof(size));
     restart_data_buffer.resize(size);
+    fs_globals.read(restart_data_buffer.data(), size);
     ser.start_unpacking(restart_data_buffer.data(), size);
 
     // Duplicate data that we can remove

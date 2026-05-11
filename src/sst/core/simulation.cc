@@ -119,8 +119,8 @@ TimeVortexSort::getEventsForHandler(uintptr_t handler)
     // events with that handler are in the vector. If no events with
     // this handler exist, it will get the first event with the next
     // higher delivery_info.  This case is handled below.
-    pvt::DeliveryInfoCompEvent* comp     = new pvt::DeliveryInfoCompEvent(handler);
-    iterator                    it_begin = std::lower_bound(data.begin(), action_start, comp, less());
+    pvt::DeliveryInfoCompEvent comp(handler);
+    iterator                   it_begin = std::lower_bound(data.begin(), action_start, &comp, less());
 
     iterator it_end = it_begin;
 

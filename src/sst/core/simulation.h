@@ -533,6 +533,7 @@ public:
     SyncManager*            syncManager;
     ComponentInfoMap        compInfoMap;
     clockMap_t              clockMap;
+    std::unordered_map<Clock::HandlerBase*, SimTime_t> handlerClockMap;
     static Exit*            m_exit;
     SimulatorHeartbeat*     m_heartbeat = nullptr;
     CheckpointAction*       checkpoint_action_;

@@ -1412,6 +1412,7 @@ Simulation::registerClock(TimeConverter tcFreq, Clock::HandlerBase* handler, int
         ce->schedule();
     }
     clockMap[mapKey]->registerHandler(handler);
+    handlerClockMap[handler] = tcFreq.getFactor();
     return tcFreq;
 }
 
@@ -1426,6 +1427,7 @@ Simulation::registerClock(SimTime_t factor, Clock::HandlerBase* handler, int pri
         ce->schedule();
     }
     clockMap[mapKey]->registerHandler(handler);
+    handlerClockMap[handler] = factor;
 }
 
 void
@@ -1447,6 +1449,7 @@ Simulation::reregisterClock(TimeConverter tc, Clock::HandlerBase* handler, int p
         out.fatal(CALL_INFO, 1, "Tried to reregister with a clock that was not previously registered, exiting...\n");
     }
     clockMap[mapKey]->registerHandler(handler);
+    handlerClockMap[handler] = tc.getFactor();
     return clockMap[mapKey]->getNextCycle();
 }
 
@@ -1465,11 +1468,9 @@ Simulation::getNextClockCycle(TimeConverter tc, int priority)
 SimTime_t
 Simulation::getClockForHandler(Clock::HandlerBase* handler)
 {
-    // Have to search all the clocks
-    for ( auto& x : clockMap ) {
-        if ( x.second->isHandlerRegistered(handler) ) {
-            return x.first.first;
-        }
+    auto iter = handlerClockMap.find(handler);
+    if ( iter != handlerClockMap.end() ) {
+        return iter->second;
     }
     return 0;
 }
@@ -1481,6 +1482,7 @@ Simulation::unregisterClock(TimeConverter tc, Clock::HandlerBase* handler, int p
     if ( clockMap.find(mapKey) != clockMap.end() ) {
         bool empty;
         clockMap[mapKey]->unregisterHandler(handler, empty);
+        handlerClockMap.erase(handler);
     }
 }
 
